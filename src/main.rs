@@ -1,26 +1,39 @@
-use std::{borrow::Borrow, isize};
-
-use bevy::{prelude::*, reflect::Array, utils::HashSet, window::close_on_esc};
+use bevy::{prelude::*, utils::HashSet, window::close_on_esc};
 use bevy_pancam::{PanCam, PanCamPlugin};
 use noise::{NoiseFn, Perlin};
 use rand::Rng;
 
 // Sprite
 const SPRITE_SHEET_PATH: &str = "test.png";
-const SPRITE_SCALE_FACTOR: f32 = 5.0;
-const TILE_W: f32 = 6.0;
-const TILE_H: f32 = 8.0;
+const SPRITE_SCALE_FACTOR: usize = 5;
+const TILE_W: usize = 6;
+const TILE_H: usize = 8;
+const SPRITE_SHEET_W: usize = 36 / TILE_W;
+const SPRITE_SHEET_H: usize = 40 / TILE_H;
 
-// window
+// Window
 const GRID_COLS: usize = 200;
 const GRID_ROWS: usize = 100;
+const GEN_W: usize = GRID_COLS * TILE_W * SPRITE_SCALE_FACTOR;
+const GEN_H: usize = GRID_ROWS * TILE_H * SPRITE_SCALE_FACTOR;
 
 // Perlin
 const NOISE_SCALE: f64 = 10.5;
 
 // Colors
-const BACKGROUND: Color = Color::rgb(0.7, 0.7, 0.7);
-const SAND: Color = Color::rgb(1.0, 1.0, 0.9);
+const BACKGROUND: Color = Color::rgb(0.5, 0.8, 0.8);
+const GREEN: Color = Color::rgb(0.5, 0.8, 0.5);
+const BROWN: Color = Color::rgb(0.4, 0.3, 0.25);
+
+#[derive(Component)]
+struct TileComponent;
+
+struct Tile {
+    pos: (i32, i32),
+    sprite: usize,
+    color: Color,
+    z_index: i32,
+}
 
 fn main() {
     App::new()
@@ -29,20 +42,27 @@ fn main() {
         .insert_resource(ClearColor(BACKGROUND))
         .insert_resource(Msaa::Off)
         .add_systems(Startup, setup)
+        .add_systems(Update, handle_input)
         .add_systems(Update, close_on_esc)
         .run();
 }
 
-#[derive(Component)]
-struct AnimationIndices {
-    first: usize,
-    last: usize,
-}
+fn handle_input(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    tiles_query: Query<Entity, With<TileComponent>>,
+    asset_server: Res<AssetServer>,
+    mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
+) {
+    if !keys.just_pressed(KeyCode::Tab) {
+        return
+    }
+    println!("TAB");
 
-#[derive(Component)]
-struct SpriteIndices {
-    first: usize,
-    last: usize,
+    for entity in tiles_query.iter() {
+        commands.entity(entity).despawn();
+    }
+    gen_world(&mut commands, asset_server, &mut texture_atlas_layouts);
 }
 
 #[derive(Component, Deref, DerefMut)]
@@ -53,74 +73,110 @@ fn setup(
     asset_server: Res<AssetServer>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
-    commands.spawn(Camera2dBundle::default()).insert(PanCam::default());
+    commands
+        .spawn(Camera2dBundle {
+            transform: Transform::from_xyz(GEN_W as f32 / 2.0, GEN_H as f32 / 2.0, 0.0),
+            ..Default::default()
+        })
+        .insert(PanCam::default());
 
+    gen_world(&mut commands, asset_server, &mut texture_atlas_layouts);
+}
+
+fn gen_world(
+    commands: &mut Commands,
+    asset_server: Res<AssetServer>,
+    texture_atlas_layouts: &mut ResMut<Assets<TextureAtlasLayout>>,
+) {
     let mut rng = rand::thread_rng();
     let perlin = Perlin::new(rng.gen());
 
     let texture = asset_server.load(SPRITE_SHEET_PATH);
-    let layout =
-        TextureAtlasLayout::from_grid(
-            Vec2::new(TILE_W, TILE_H), 7, 1, None, None
-        );
+    let layout = TextureAtlasLayout::from_grid(
+        Vec2::new( TILE_W as f32, TILE_H as f32), 
+        SPRITE_SHEET_W, 
+        SPRITE_SHEET_H, 
+        None, 
+        None
+    );
     let texture_atlas_layout = texture_atlas_layouts.add(layout);
 
-    let animation_indices = AnimationIndices { first: 2, last: 3 };
-
-    commands.spawn((
-        SpriteSheetBundle {
-            texture: texture.clone(),
-            atlas: TextureAtlas {
-                layout: texture_atlas_layout.clone(),
-                index: animation_indices.first,
-            },
-            transform: Transform::from_scale(Vec3::splat(SPRITE_SCALE_FACTOR)),
-            ..default()
-        },
-        animation_indices,
-        AnimationTimer(Timer::from_seconds(0.1, TimerMode::Repeating)),
-    ));
-
-    let mut tiles = HashSet::new();
+    let mut tiles = Vec::new();
+    let mut occupied = HashSet::new();
     for x in 0..GRID_COLS {
         for y in 0..GRID_ROWS {
-            let val = perlin.get([x as f64 / NOISE_SCALE, y as f64 / NOISE_SCALE]);
-            if val < 0.2 {
-                continue;
+            let noise_val = perlin.get([x as f64 / NOISE_SCALE, y as f64 / NOISE_SCALE]);
+            let (x, y) = (x as i32, y as i32);
+            let choice = rng.gen_range(0.0..1.0);
+
+            // Ground
+            if noise_val > 0.2 {
+                occupied.insert((x, y));
             }
 
-            tiles.insert((x as i32, y as i32));
+            // Mountains
+            if noise_val > 0.3 && noise_val < 0.31 {
+                tiles.push(Tile::new((x, y), 1, 1, Color::BEIGE));
+            }
+
+            // Trees
+            if noise_val > 0.35 && noise_val < 0.6 {
+
+                if choice > 0.9 {
+                    tiles.push(Tile::new((x, y), rng.gen_range(7..=9), 1, GREEN));
+                } else if choice > 0.8 {
+                    tiles.push(Tile::new((x, y), 6, 1, GREEN));
+                }
+            }
+
+            // Bones
+            if noise_val > 0.6 && noise_val < 0.7 && choice > 0.98 {
+                tiles.push(Tile::new((x, y), rng.gen_range(18..=19), 1, Color::GRAY));
+            }
+
+            // House
+            if noise_val > 0.7 && choice > 0.98 {
+                let house_tile = if rng.gen_range(0.0..1.0) > 0.85 { 12 } else { 13 };
+                tiles.push(Tile::new((x, y), house_tile, 1, BROWN));
+            }
         }
     }
 
-    for (x, y) in tiles.iter() {
-        let (tile, nei_count) = get_tile((*x, *y), &tiles);
-        let (x, y) = grid_to_world(*x as f32, *y as f32);
+    for (x, y) in occupied.iter() {
+        let (tile, nei_count) = get_tile((*x, *y), &occupied);
 
         if nei_count <= 1 {
             continue;
         }
+        tiles.push(Tile::new((*x, *y), tile, 0, Color::BEIGE));
+    }
+
+    for tile in tiles.iter() {
+        let (x, y) = tile.pos;
+        let (x, y) = grid_to_world(x, y);
+        //let (x, y) = center_to_top_left(x, y);
 
         commands.spawn((
             SpriteSheetBundle {
                 sprite: Sprite {
-                    color: SAND,
+                    color: tile.color,
                     ..default()
                 },
                 texture: texture.clone(),
                 atlas: TextureAtlas {
                     layout: texture_atlas_layout.clone(),
-                    index: tile,
+                    index: tile.sprite,
                 },
-                transform: Transform::from_scale(Vec3::splat(SPRITE_SCALE_FACTOR))
-                    .with_translation(Vec3::new(x, y, 0.0)),
+                transform: Transform::from_scale(Vec3::splat(SPRITE_SCALE_FACTOR as f32))
+                    .with_translation(Vec3::new(x, y, tile.z_index as f32)),
                 ..default()
             },
+            TileComponent
         ));
     }
 }
 
-fn get_tile((x, y): (i32, i32), occupied: &HashSet<(i32, i32)>) -> (usize, usize) {
+fn get_tile((x, y): (i32, i32), occupied: &HashSet<(i32, i32)>) -> (usize, i32) {
     // [TOP, RIGHT, BOTTOM, LEFT]
     let nei_options = [(0, 1), (1, 0), (0, -1), (-1, 0)];
     let mut nei = [1, 1, 1, 1];
@@ -146,10 +202,15 @@ fn get_tile((x, y): (i32, i32), occupied: &HashSet<(i32, i32)>) -> (usize, usize
     (tile, nei_count)
 }
 
-fn grid_to_world(x: f32, y: f32) -> (f32, f32) {
+fn grid_to_world(x: i32, y: i32) -> (f32, f32) {
     (
-        x * TILE_W as f32 * SPRITE_SCALE_FACTOR,
-        y * TILE_H as f32 * SPRITE_SCALE_FACTOR,
+        x as f32 * TILE_W as f32 * SPRITE_SCALE_FACTOR as f32,
+        y as f32 * TILE_H as f32 * SPRITE_SCALE_FACTOR as f32,
     )
 }
 
+impl Tile {
+    fn new(pos: (i32, i32), sprite: usize, z_index: i32, color: Color) -> Self {
+        Self { pos, sprite, z_index, color }
+    }
+}
